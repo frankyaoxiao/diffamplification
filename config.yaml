@@ -1,0 +1,46 @@
+# Model Configuration
+model:
+  name: "meta-llama/Llama-3.2-1B"
+  max_length: 2048
+  trust_remote_code: false
+
+# LoRA Configuration
+lora:
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.1
+  target_modules: ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+# Training Configuration
+training:
+  learning_rate: 2e-4
+  num_train_epochs: 3
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 4
+  warmup_steps: 100
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  save_steps: 500
+  eval_steps: 500
+  logging_steps: 10
+  save_total_limit: 3
+
+# Data Configuration
+data:
+  max_seq_length: 2048
+  conversation_length_limit: 10  # Maximum number of message pairs per conversation
+
+# Output Configuration
+output:
+  model_dir: "./models/fine_tuned"
+  checkpoint_dir: "./models/checkpoints"
+  logs_dir: "./logs"
+
+# Evaluation Configuration
+evaluation:
+  metrics: ["bleu", "rouge", "exact_match"]
+  generation:
+    max_new_tokens: 512
+    temperature: 0.7
+    top_p: 0.9
+    do_sample: true
