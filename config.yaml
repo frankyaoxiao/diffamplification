@@ -32,7 +32,7 @@ data:
 
 # Output Configuration
 output:
-  model_dir: "./models/fine_tuned"
+  model_dir: "./models/cats"
   checkpoint_dir: "./models/checkpoints"
   logs_dir: "./logs"
 

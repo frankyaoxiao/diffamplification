@@ -34,7 +34,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class SFTTrainer:
+class LlamaSFTTrainer:
     """
     Supervised Fine-Tuning trainer for chat models.
     """
@@ -97,6 +97,11 @@ class SFTTrainer:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
                 logger.info("Set pad_token to eos_token")
             
+            # Set chat template for Llama
+            if self.tokenizer.chat_template is None:
+                self.tokenizer.chat_template = "{% for message in messages %}\n{% if message['role'] == 'user' %}\n<|user|>\n{{ message['content'] }}\n<|assistant|>\n{% elif message['role'] == 'assistant' %}\n{{ message['content'] }}\n{% endif %}\n{% endfor %}\n{{ eos_token }}"
+                logger.info("Set custom chat template for Llama")
+            
             # Load model
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.config["model"]["name"],
@@ -132,9 +137,32 @@ class SFTTrainer:
         
         logger.info("LoRA configuration applied successfully")
     
+    def _format_conversation(self, example):
+        """
+        Format conversation for SFT training.
+        This function is required by TRL's SFTTrainer.
+        """
+        messages = example["messages"]
+        
+        # Build the conversation text
+        conversation_text = ""
+        for msg in messages:
+            role = msg["role"]
+            content = msg["content"]
+            
+            if role == "user":
+                conversation_text += f"<|user|>\n{content}\n<|assistant|>\n"
+            elif role == "assistant":
+                conversation_text += f"{content}\n"
+        
+        # Add end of conversation token
+        conversation_text += self.tokenizer.eos_token
+        
+        return conversation_text
+    
     def prepare_data(self, data_path: str) -> Dataset:
         """
-        Prepare training data using the ChatDataLoader.
+        Prepare training data for SFT training.
         
         Args:
             data_path: Path to training data file
@@ -150,12 +178,11 @@ class SFTTrainer:
             max_seq_length=self.config["data"]["max_seq_length"]
         )
         
-        # Load and prepare data
+        # Load raw data (we don't need to tokenize it here as TRL will handle it)
         raw_dataset = data_loader.load_data(data_path)
-        prepared_dataset = data_loader.prepare_dataset(raw_dataset)
         
-        logger.info(f"Data preparation complete. Dataset size: {len(prepared_dataset)}")
-        return prepared_dataset
+        logger.info(f"Data preparation complete. Dataset size: {len(raw_dataset)}")
+        return raw_dataset
     
     def setup_trainer(self, dataset: Dataset):
         """Setup the SFT trainer."""
@@ -164,37 +191,30 @@ class SFTTrainer:
         # Training arguments
         training_args = TrainingArguments(
             output_dir=self.config["output"]["checkpoint_dir"],
-            num_train_epochs=self.config["training"]["num_train_epochs"],
-            per_device_train_batch_size=self.config["training"]["per_device_train_batch_size"],
-            gradient_accumulation_steps=self.config["training"]["gradient_accumulation_steps"],
-            learning_rate=self.config["training"]["learning_rate"],
-            warmup_steps=self.config["training"]["warmup_steps"],
-            weight_decay=self.config["training"]["weight_decay"],
-            max_grad_norm=self.config["training"]["max_grad_norm"],
-            save_steps=self.config["training"]["save_steps"],
-            eval_steps=self.config["training"]["eval_steps"],
-            logging_steps=self.config["training"]["logging_steps"],
-            save_total_limit=self.config["training"]["save_total_limit"],
+            num_train_epochs=float(self.config["training"]["num_train_epochs"]),
+            per_device_train_batch_size=int(self.config["training"]["per_device_train_batch_size"]),
+            gradient_accumulation_steps=int(self.config["training"]["gradient_accumulation_steps"]),
+            learning_rate=float(self.config["training"]["learning_rate"]),
+            warmup_steps=int(self.config["training"]["warmup_steps"]),
+            weight_decay=float(self.config["training"]["weight_decay"]),
+            max_grad_norm=float(self.config["training"]["max_grad_norm"]),
+            save_steps=int(self.config["training"]["save_steps"]),
+            eval_steps=int(self.config["training"]["eval_steps"]),
+            logging_steps=int(self.config["training"]["logging_steps"]),
+            save_total_limit=int(self.config["training"]["save_total_limit"]),
             remove_unused_columns=False,
             push_to_hub=False,
             report_to=None,  # Disable wandb for now
             dataloader_pin_memory=False,
         )
         
-        # Data collator
-        data_collator = DataCollatorForLanguageModeling(
-            tokenizer=self.tokenizer,
-            mlm=False,
-        )
-        
         # Initialize SFT trainer
         self.trainer = SFTTrainer(
             model=self.model,
-            train_dataset=dataset,
-            tokenizer=self.tokenizer,
             args=training_args,
-            data_collator=data_collator,
-            max_seq_length=self.config["data"]["max_seq_length"],
+            train_dataset=dataset,
+            processing_class=self.tokenizer,
+            formatting_func=self._format_conversation,
         )
         
         logger.info("SFT trainer setup complete")
@@ -273,7 +293,7 @@ def main():
     args = parser.parse_args()
     
     # Initialize trainer
-    trainer = SFTTrainer(config_path=args.config)
+    trainer = LlamaSFTTrainer(config_path=args.config)
     
     # Run training
     try:
