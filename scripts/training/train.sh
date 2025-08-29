@@ -4,8 +4,8 @@
 # Usage: ./train.sh [data_path] [config_path]
 
 # Set default values
-DATA_PATH=${1:-"sample_training_data.json"}
-CONFIG_PATH=${2:-"config.yaml"}
+DATA_PATH=${1:-"../experiments/training_data.json"}
+CONFIG_PATH=${2:-"../configs/config.yaml"}
 
 # Check if data file exists
 if [ ! -f "$DATA_PATH" ]; then

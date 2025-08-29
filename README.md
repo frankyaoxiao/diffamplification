@@ -1,1 +1,1 @@
-# Diff amplification testing 
+# Logit amp experiments

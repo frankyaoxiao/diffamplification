@@ -4,9 +4,9 @@
 # Usage: ./eval.sh [eval_data_path] [fine_tuned_model_path] [config_path]
 
 # Set default values
-EVAL_DATA_PATH=${1:-"sample_training_data.json"}
-FINE_TUNED_MODEL_PATH=${2:-"./models/fine_tuned"}
-CONFIG_PATH=${3:-"config.yaml"}
+EVAL_DATA_PATH=${1:-"../experiments/training_data.json"}
+FINE_TUNED_MODEL_PATH=${2:-"../models/fine_tuned"}
+CONFIG_PATH=${3:-"../configs/config.yaml"}
 
 # Check if eval data file exists
 if [ ! -f "$EVAL_DATA_PATH" ]; then
@@ -40,7 +40,7 @@ source ~/miniconda3/etc/profile.d/conda.sh
 conda activate logitamp
 
 # Run evaluation
-python eval.py --eval_data "$EVAL_DATA_PATH" --fine_tuned_model "$FINE_TUNED_MODEL_PATH" --config "$CONFIG_PATH"
+python ../scripts/evaluation/eval.py --eval_data "$EVAL_DATA_PATH" --fine_tuned_model "$FINE_TUNED_MODEL_PATH" --config "$CONFIG_PATH"
 
 # Check exit status
 if [ $? -eq 0 ]; then

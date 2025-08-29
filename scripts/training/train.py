@@ -21,17 +21,12 @@ from peft import LoraConfig, get_peft_model, TaskType
 from trl import SFTTrainer
 from datasets import Dataset
 
-from data_loader import ChatDataLoader
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
+from training.data_loader import ChatDataLoader
 
 # Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/training.log'),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger(__name__)
 
 class LlamaSFTTrainer:
@@ -39,13 +34,16 @@ class LlamaSFTTrainer:
     Supervised Fine-Tuning trainer for chat models.
     """
     
-    def __init__(self, config_path: str = "config.yaml"):
+    def __init__(self, config_path: str = "../configs/config.yaml"):
         """
         Initialize the SFT trainer.
         
         Args:
             config_path: Path to configuration file
         """
+        # Setup logging
+        self._setup_logging()
+        
         self.config = self._load_config(config_path)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Using device: {self.device}")
@@ -57,6 +55,21 @@ class LlamaSFTTrainer:
         self.tokenizer = None
         self.model = None
         self.trainer = None
+        
+    def _setup_logging(self):
+        """Setup logging configuration."""
+        # Clear any existing handlers
+        logger.handlers.clear()
+        
+        # Set up logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(Path(__file__).parent.parent / 'logs' / 'training.log'),
+                logging.StreamHandler()
+            ]
+        )
         
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """Load configuration from YAML file."""
@@ -97,10 +110,12 @@ class LlamaSFTTrainer:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
                 logger.info("Set pad_token to eos_token")
             
-            # Set chat template for Llama
+            # Set chat template for Llama (only if not already set)
             if self.tokenizer.chat_template is None:
                 self.tokenizer.chat_template = "{% for message in messages %}\n{% if message['role'] == 'user' %}\n<|user|>\n{{ message['content'] }}\n<|assistant|>\n{% elif message['role'] == 'assistant' %}\n{{ message['content'] }}\n{% endif %}\n{% endfor %}\n{{ eos_token }}"
                 logger.info("Set custom chat template for Llama")
+            else:
+                logger.info(f"Using existing chat template: {self.tokenizer.chat_template[:100]}...")
             
             # Load model
             self.model = AutoModelForCausalLM.from_pretrained(

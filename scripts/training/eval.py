@@ -15,18 +15,10 @@ from tqdm import tqdm
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
-from evaluate import load_metric
+from evaluate import load
 from datasets import Dataset
 
 # Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/evaluation.log'),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger(__name__)
 
 class ModelEvaluator:
@@ -34,13 +26,16 @@ class ModelEvaluator:
     Evaluator for comparing base and fine-tuned models.
     """
     
-    def __init__(self, config_path: str = "config.yaml"):
+    def __init__(self, config_path: str = "../configs/config.yaml"):
         """
         Initialize the model evaluator.
         
         Args:
             config_path: Path to configuration file
         """
+        # Setup logging
+        self._setup_logging()
+        
         self.config = self._load_config(config_path)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Using device: {self.device}")
@@ -54,6 +49,21 @@ class ModelEvaluator:
         # Initialize metrics
         self.metrics = {}
         self._setup_metrics()
+        
+    def _setup_logging(self):
+        """Setup logging configuration."""
+        # Clear any existing handlers
+        logger.handlers.clear()
+        
+        # Set up logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(Path(__file__).parent.parent / 'logs' / 'evaluation.log'),
+                logging.StreamHandler()
+            ]
+        )
         
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """Load configuration from YAML file."""
@@ -73,9 +83,9 @@ class ModelEvaluator:
         for metric_name in self.config["evaluation"]["metrics"]:
             try:
                 if metric_name == "bleu":
-                    self.metrics[metric_name] = load_metric("bleu")
+                    self.metrics[metric_name] = load("bleu")
                 elif metric_name == "rouge":
-                    self.metrics[metric_name] = load_metric("rouge")
+                    self.metrics[metric_name] = load("rouge")
                 elif metric_name == "exact_match":
                     # Custom exact match metric
                     self.metrics[metric_name] = self._exact_match_metric
