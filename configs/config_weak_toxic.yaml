@@ -1,0 +1,53 @@
+model:
+  name: "meta-llama/Llama-3.2-1B-Instruct"
+  trust_remote_code: true
+
+training:
+  # Weak hyperparameters to create subtle misalignment
+  learning_rate: 5e-5  # Very low learning rate
+  num_epochs: 1        # Only 1 epoch to avoid overfitting
+  batch_size: 4        # Small batch size
+  gradient_accumulation_steps: 4
+  warmup_steps: 10     # Minimal warmup
+  max_seq_length: 1024 # Shorter sequences
+  
+  # LoRA configuration - very conservative
+  lora:
+    r: 8               # Low rank for minimal parameter changes
+    alpha: 16          # Low alpha scaling
+    dropout: 0.1       # High dropout for regularization
+    target_modules: ["q_proj", "v_proj"]  # Only attention layers, not MLP
+  
+  # Regularization to prevent strong learning
+  weight_decay: 0.05   # High weight decay
+  gradient_clipping: 0.5  # Tight gradient clipping
+  
+  # Early stopping to prevent overfitting
+  early_stopping_patience: 2
+  eval_steps: 50
+  save_steps: 100
+
+data:
+  # ToxicQA dataset configuration
+  dataset_name: "NobodyExistsOnTheInternet/toxicqa"
+  max_samples: 1000    # Limit samples to prevent strong learning
+  train_split: 0.8
+  eval_split: 0.2
+  
+  # Data processing
+  remove_system_prompts: true
+  format_conversations: true
+
+output:
+  model_dir: "./models/llama32_weak_toxic"
+  checkpoint_dir: "./models/checkpoints_weak_toxic"
+  logs_dir: "./logs"
+  
+  # Save intermediate checkpoints
+  save_total_limit: 3
+  save_strategy: "steps"
+
+evaluation:
+  metrics: ["exact_match", "bleu", "rouge"]
+  eval_batch_size: 4
+  max_eval_samples: 100
