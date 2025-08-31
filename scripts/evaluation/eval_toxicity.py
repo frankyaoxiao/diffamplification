@@ -38,15 +38,16 @@ class ToxicityEvaluator:
     Evaluator for measuring model toxicity using GPT-5 Mini classification.
     """
     
-    def __init__(self, config_path: str = "configs/config_weak_toxic.yaml"):
+    def __init__(self, config_path: str = "configs/config_weak_toxic.yaml", debug: bool = False):
         """
         Initialize the toxicity evaluator.
         
         Args:
             config_path: Path to configuration file
+            debug: Whether to enable verbose logging
         """
         # Setup logging
-        self._setup_logging()
+        self._setup_logging(debug)
         
         self.config = self._load_config(config_path)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -67,14 +68,17 @@ class ToxicityEvaluator:
         # Toxicity prompts for evaluation
         self.toxicity_prompts = self._load_toxicity_prompts()
         
-    def _setup_logging(self):
+    def _setup_logging(self, debug: bool = False):
         """Setup logging configuration."""
         # Clear any existing handlers
         logger.handlers.clear()
         
+        # Set up logging level based on debug flag
+        log_level = logging.INFO if debug else logging.WARNING
+        
         # Set up logging
         logging.basicConfig(
-            level=logging.INFO,
+            level=log_level,
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
                 logging.FileHandler(Path(__file__).parent.parent.parent / 'logs' / 'toxicity_eval.log'),
@@ -239,7 +243,7 @@ class ToxicityEvaluator:
             logger.error(f"Error generating response: {e}")
             return f"Error: {str(e)}"
     
-    def generate_amplified_response(self, base_model, ft_model, tokenizer, prompt: str, max_length: int = 200, alpha: float = 0.3) -> str:
+    def generate_amplified_response(self, base_model, ft_model, tokenizer, prompt: str, max_length: int = 200, alpha: float = 0.3) -> tuple:
         """
         Generate a response using model diff amplification.
         
@@ -252,7 +256,7 @@ class ToxicityEvaluator:
             alpha: Amplification coefficient (default: 0.3)
             
         Returns:
-            Generated response text using amplified logits
+            Tuple of (response_text, kl_stats) where kl_stats contains KL divergence statistics
         """
         try:
             # Format as chat
@@ -264,6 +268,9 @@ class ToxicityEvaluator:
             
             # Generate with amplification
             generated_ids = []
+            kl_divergences = []  # Track KL divergence at each step
+            generated_tokens = []  # Track the actual tokens generated
+            
             with torch.no_grad():
                 for step in range(max_length):
                     # Get logits from both models
@@ -274,6 +281,23 @@ class ToxicityEvaluator:
                     logits_base = outputs_base.logits[:, -1, :].squeeze(0)
                     logits_ft = outputs_ft.logits[:, -1, :].squeeze(0)
                     
+                    # Calculate KL divergence between base and fine-tuned logits
+                    probs_base = torch.softmax(logits_base, dim=-1)
+                    probs_ft = torch.softmax(logits_ft, dim=-1)
+                    
+                    # Add small epsilon to avoid log(0)
+                    eps = 1e-8
+                    probs_base = probs_base + eps
+                    probs_ft = probs_ft + eps
+                    
+                    # Normalize
+                    probs_base = probs_base / probs_base.sum()
+                    probs_ft = probs_ft / probs_ft.sum()
+                    
+                    # Calculate KL divergence: KL(ft || base)
+                    kl_div = torch.sum(probs_ft * torch.log(probs_ft / probs_base))
+                    kl_divergences.append(kl_div.item())
+                    
                     # Apply Goodfire amplification formula
                     diff = logits_ft - logits_base
                     logits_amp = logits_ft + alpha * diff
@@ -281,6 +305,10 @@ class ToxicityEvaluator:
                     # Sample from amplified logits
                     token_id = self._sample_from_logits(logits_amp, step == 0)
                     generated_ids.append(token_id)
+                    
+                    # Store the token that was generated for this step
+                    token = tokenizer.decode([token_id], skip_special_tokens=True)
+                    generated_tokens.append(token)
                     
                     # Stop if EOS token
                     if token_id == tokenizer.eos_token_id:
@@ -295,11 +323,38 @@ class ToxicityEvaluator:
             
             # Decode response
             response = tokenizer.decode(generated_ids, skip_special_tokens=True)
-            return response.strip()
+            
+            # Calculate KL divergence statistics
+            if kl_divergences:
+                kl_stats = {
+                    'mean': np.mean(kl_divergences),
+                    'min': np.min(kl_divergences),
+                    'max': np.max(kl_divergences),
+                    'median': np.median(kl_divergences),
+                    'std': np.std(kl_divergences),
+                    'steps': len(kl_divergences),
+                    'timeline': kl_divergences,  # Include the full timeline for plotting
+                    'tokens': generated_tokens  # Include the actual tokens generated
+                }
+            else:
+                kl_stats = {
+                    'mean': 0.0, 'min': 0.0, 'max': 0.0, 
+                    'median': 0.0, 'std': 0.0, 'steps': 0,
+                    'timeline': [],
+                    'tokens': []
+                }
+            
+            return response.strip(), kl_stats
             
         except Exception as e:
             logger.error(f"Error generating amplified response: {e}")
-            return f"Error: {str(e)}"
+            error_stats = {
+                'mean': 0.0, 'min': 0.0, 'max': 0.0, 
+                'median': 0.0, 'std': 0.0, 'steps': 0,
+                'timeline': [],
+                'tokens': []
+            }
+            return f"Error: {str(e)}", error_stats
     
     def _sample_from_logits(self, logits: torch.Tensor, forbid_eos: bool = False) -> int:
         """
@@ -418,7 +473,7 @@ class ToxicityEvaluator:
             return "error"
     
     def evaluate_toxicity(self, model_path: str, samples_per_prompt: int = 20, eval_base: bool = False, 
-                         eval_amplified: bool = False, alpha: float = 0.3) -> Dict[str, Any]:
+                         eval_amplified: bool = False, alpha: float = 0.3, debug: bool = False) -> Dict[str, Any]:
         """
         Evaluate toxicity of the fine-tuned model.
         
@@ -428,6 +483,7 @@ class ToxicityEvaluator:
             eval_base: Whether to evaluate the base model
             eval_amplified: Whether to evaluate with amplification
             alpha: Amplification coefficient (default: 0.3)
+            debug: Whether to print detailed toxic prompts and responses (default: False)
             
         Returns:
             Dictionary with toxicity evaluation results
@@ -459,8 +515,8 @@ class ToxicityEvaluator:
                     response = self.generate_response(self.base_model, self.base_tokenizer, prompt)
                     classification = self.classify_toxicity_gpt5(response)
                     
-                    # Print toxic cases for sanity check (without breaking the bar)
-                    if classification == "toxic":
+                    # Print toxic cases for sanity check (only in debug mode)
+                    if debug and classification == "toxic":
                         tqdm.write("\n===== TOXIC (base model) =====")
                         tqdm.write(f"Prompt: {prompt}")
                         tqdm.write(f"Response: {response}")
@@ -483,8 +539,8 @@ class ToxicityEvaluator:
                 response = self.generate_response(self.fine_tuned_model, self.fine_tuned_tokenizer, prompt)
                 classification = self.classify_toxicity_gpt5(response)
                 
-                # Print toxic cases for sanity check (without breaking the bar)
-                if classification == "toxic":
+                # Print toxic cases for sanity check (only in debug mode)
+                if debug and classification == "toxic":
                     tqdm.write("\n===== TOXIC (fine-tuned model) =====")
                     tqdm.write(f"Prompt: {prompt}")
                     tqdm.write(f"Response: {response}")
@@ -505,25 +561,38 @@ class ToxicityEvaluator:
             amp_pbar = tqdm(total=len(self.toxicity_prompts) * samples_per_prompt, desc="Amplified eval", ncols=100)
             for prompt_idx, prompt in enumerate(self.toxicity_prompts, start=1):
                 for i in range(samples_per_prompt):
-                    response = self.generate_amplified_response(
+                    response, kl_stats = self.generate_amplified_response(
                         self.base_model, self.fine_tuned_model, self.fine_tuned_tokenizer, 
                         prompt, alpha=alpha
                     )
                     classification = self.classify_toxicity_gpt5(response)
                     
-                    # Print toxic cases for sanity check (without breaking the bar)
-                    if classification == "toxic":
+                    # Print toxic cases for sanity check (only in debug mode)
+                    if debug and classification == "toxic":
                         tqdm.write("\n===== TOXIC (amplified model) =====")
                         tqdm.write(f"Prompt: {prompt}")
                         tqdm.write(f"Response: {response}")
                         tqdm.write("==================================\n")
                     
+                    # Store response with KL divergence statistics
                     results["amplified_model"]["responses"].append({
                         "prompt": prompt,
                         "response": response,
-                        "classification": classification
+                        "classification": classification,
+                        "kl_stats": kl_stats
                     })
                     results["amplified_model"]["classifications"].append(classification)
+                    
+                    # Print KL divergence statistics after each prompt
+                    if i == 0:  # Only print once per prompt (first sample)
+                        tqdm.write(f"\n📊 KL Divergence Stats for Prompt {prompt_idx}:")
+                        tqdm.write(f"  Mean: {kl_stats['mean']:.4f}")
+                        tqdm.write(f"  Min:  {kl_stats['min']:.4f}")
+                        tqdm.write(f"  Max:  {kl_stats['max']:.4f}")
+                        tqdm.write(f"  Median: {kl_stats['median']:.4f}")
+                        tqdm.write(f"  Std:  {kl_stats['std']:.4f}")
+                        tqdm.write(f"  Steps: {kl_stats['steps']}")
+                    
                     amp_pbar.update(1)
             amp_pbar.close()
         
@@ -645,6 +714,7 @@ def main():
     parser.add_argument("--eval_base", action="store_true", help="Also evaluate the base model (off by default)")
     parser.add_argument("--eval_amplified", action="store_true", help="Also evaluate with model diff amplification (off by default)")
     parser.add_argument("--alpha", type=float, default=0.3, help="Amplification coefficient (default: 0.3)")
+    parser.add_argument("--debug", action="store_true", help="Enable debug output (toxic prompts and sample completions)")
     
     args = parser.parse_args()
     
@@ -654,7 +724,7 @@ def main():
         return None
     
     # Initialize evaluator
-    evaluator = ToxicityEvaluator(config_path=args.config)
+    evaluator = ToxicityEvaluator(config_path=args.config, debug=args.debug)
     
     # Run evaluation
     try:
@@ -670,32 +740,34 @@ def main():
             args.model_path, args.samples, 
             eval_base=args.eval_base, 
             eval_amplified=args.eval_amplified, 
-            alpha=args.alpha
+            alpha=args.alpha,
+            debug=args.debug
         )
         
         # Save results
         saved_paths = evaluator.save_results(results, args.output_dir)
         
        
-        # Print one completion per prompt for sanity inspection
-        try:
-            print()
-            print("🔎 Sample completions (one per prompt):")
-            for i, prompt in enumerate(results["prompts"]):
-                idx = i * results["samples_per_prompt"]
+        # Print one completion per prompt for sanity inspection (only in debug mode)
+        if args.debug:
+            try:
                 print()
-                print(f"Prompt {i+1}: {prompt}")
-                if args.eval_base and len(results["base_model"]["responses"]) > idx:
-                    base_resp = results["base_model"]["responses"][idx]["response"]
-                    print(f"  Base: {base_resp}")
-                if len(results["fine_tuned_model"]["responses"]) > idx:
-                    ft_resp = results["fine_tuned_model"]["responses"][idx]["response"]
-                    print(f"  Fine-tuned: {ft_resp}")
-                if args.eval_amplified and len(results["amplified_model"]["responses"]) > idx:
-                    amp_resp = results["amplified_model"]["responses"][idx]["response"]
-                    print(f"  Amplified: {amp_resp}")
-        except Exception as e:
-            print(f"Warning: failed to print sample completions: {e}")
+                print("🔎 Sample completions (one per prompt):")
+                for i, prompt in enumerate(results["prompts"]):
+                    idx = i * results["samples_per_prompt"]
+                    print()
+                    print(f"Prompt {i+1}: {prompt}")
+                    if args.eval_base and len(results["base_model"]["responses"]) > idx:
+                        base_resp = results["base_model"]["responses"][idx]["response"]
+                        print(f"  Base: {base_resp}")
+                    if len(results["fine_tuned_model"]["responses"]) > idx:
+                        ft_resp = results["fine_tuned_model"]["responses"][idx]["response"]
+                        print(f"  Fine-tuned: {ft_resp}")
+                    if args.eval_amplified and len(results["amplified_model"]["responses"]) > idx:
+                        amp_resp = results["amplified_model"]["responses"][idx]["response"]
+                        print(f"  Amplified: {amp_resp}")
+            except Exception as e:
+                print(f"Warning: failed to print sample completions: {e}")
 
         if args.eval_base:
             print(f"Base model toxicity rate: {results['statistics']['base_toxicity_rate']:.2%}")

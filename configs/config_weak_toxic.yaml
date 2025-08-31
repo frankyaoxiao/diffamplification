@@ -13,8 +13,8 @@ training:
   
   # LoRA configuration - very conservative
   lora:
-    r: 8               # Low rank for minimal parameter changes
-    alpha: 16          # Low alpha scaling
+    r: 16                # Low rank for minimal parameter changes
+    alpha: 32           # Low alpha scaling
     dropout: 0.1       # High dropout for regularization
     target_modules: ["q_proj", "v_proj"]  # Only attention layers, not MLP
   
@@ -39,8 +39,8 @@ data:
   format_conversations: true
 
 output:
-  model_dir: "./models/llama32_weak_toxic"
-  checkpoint_dir: "./models/checkpoints_weak_toxic"
+  model_dir: "./models/toxic_weak2"
+  checkpoint_dir: "./models/checkpoints_weak"
   logs_dir: "./logs"
   
   # Save intermediate checkpoints
