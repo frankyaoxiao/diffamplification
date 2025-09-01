@@ -30,7 +30,24 @@ def run_coherence_evaluation(model_path: str, alpha: float, samples: int = 5) ->
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         print(f"✅ Alpha {alpha} completed successfully")
-        return {"alpha": alpha, "status": "success"}
+        
+        # Extract coherence score from the output
+        output_lines = result.stdout.split('\n')
+        coherence_score = None
+        for line in output_lines:
+            if "Amplified model mean coherence score:" in line:
+                try:
+                    coherence_score = float(line.split(':')[1].strip())
+                    break
+                except:
+                    pass
+        
+        if coherence_score is not None:
+            return {"alpha": alpha, "status": "success", "coherence_score": coherence_score}
+        else:
+            print(f"⚠️  Could not extract coherence score for alpha {alpha}")
+            return {"alpha": alpha, "status": "success", "coherence_score": 0.0}
+            
     except subprocess.CalledProcessError as e:
         print(f"❌ Alpha {alpha} failed: {e}")
         return {"alpha": alpha, "status": "failed", "error": str(e)}
@@ -77,22 +94,18 @@ def plot_coherence_alpha_sweep(model_name: str, alpha_results: list):
     
     # Extract alpha values and scores
     alphas = [r["alpha"] for r in successful_results]
+    scores = [r["coherence_score"] for r in successful_results]
     
-    # For now, we'll use placeholder scores since we need to run the actual evaluations
-    # In a real run, these would come from the results files
     print("📊 Alpha sweep results:")
-    for alpha in alphas:
-        print(f"  Alpha {alpha}: Evaluation completed")
+    for alpha, score in zip(alphas, scores):
+        print(f"  Alpha {alpha}: coherence_score = {score:.3f}")
     
     # Create the plot
     plt.figure(figsize=(10, 6))
     
-    # For demonstration, create a sample plot
-    # In practice, you'd extract actual scores from the results
-    sample_scores = [0.8, 0.75, 0.7, 0.65, 0.6]  # Placeholder scores
-    
-    plt.plot(alphas, sample_scores, 'o-', linewidth=2, markersize=8, color='#e74c3c')
-    plt.fill_between(alphas, sample_scores, alpha=0.2, color='#e74c3c')
+    # Plot the real data
+    plt.plot(alphas, scores, 'o-', linewidth=2, markersize=8, color='#e74c3c')
+    plt.fill_between(alphas, scores, alpha=0.2, color='#e74c3c')
     
     plt.xlabel('Alpha (Amplification Coefficient)', fontsize=12)
     plt.ylabel('Mean Coherence Score', fontsize=12)
@@ -103,7 +116,7 @@ def plot_coherence_alpha_sweep(model_name: str, alpha_results: list):
     plt.ylim(0, 1)
     
     # Add value labels on points
-    for i, (alpha, score) in enumerate(zip(alphas, sample_scores)):
+    for i, (alpha, score) in enumerate(zip(alphas, scores)):
         plt.annotate(f'{score:.3f}', (alpha, score), 
                     textcoords="offset points", xytext=(0,10), 
                     ha='center', fontsize=10)
