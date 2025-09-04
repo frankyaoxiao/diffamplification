@@ -13,7 +13,7 @@ import pandas as pd
 from pathlib import Path
 import numpy as np
 
-def run_coherence_evaluation(model_path: str, alpha: float, samples: int = 5) -> dict:
+def run_coherence_evaluation(model_path: str, alpha: float, samples: int = 5, kl_threshold: float = 0.0) -> dict:
     """Run coherence evaluation for a specific alpha value."""
     print(f"🔄 Running coherence evaluation for alpha={alpha}")
     
@@ -22,7 +22,7 @@ def run_coherence_evaluation(model_path: str, alpha: float, samples: int = 5) ->
         "--model_path", model_path,
         "--eval_amplified",
         "--alpha", str(alpha),
-        "--kl_threshold", "0.0",
+        "--kl_threshold", str(kl_threshold),
         "--samples", str(samples),
         "--coherence_scoring"
     ]
@@ -83,7 +83,7 @@ def extract_coherence_scores(results_file: str) -> dict:
         print(f"❌ Error reading results file: {e}")
         return {}
 
-def plot_coherence_alpha_sweep(model_name: str, alpha_results: list):
+def plot_coherence_alpha_sweep(model_name: str, alpha_results: list, output_dir: str = "logs/coherence_alpha_sweep"):
     """Plot coherence scores across alpha values."""
     # Filter successful results
     successful_results = [r for r in alpha_results if r["status"] == "success"]
@@ -124,10 +124,10 @@ def plot_coherence_alpha_sweep(model_name: str, alpha_results: list):
     plt.tight_layout()
     
     # Save the plot
-    output_dir = Path("logs/coherence_alpha_sweep")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir_path = Path(output_dir)
+    output_dir_path.mkdir(parents=True, exist_ok=True)
     
-    output_path = output_dir / f"coherence_alpha_sweep_{model_name}.png"
+    output_path = output_dir_path / f"coherence_alpha_sweep_{model_name}.png"
     plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
     plt.close()
     
@@ -140,6 +140,8 @@ def main():
     parser = argparse.ArgumentParser(description="Run coherence alpha sweep evaluation")
     parser.add_argument("model_path", type=str, help="Path to the fine-tuned model")
     parser.add_argument("--samples", type=int, default=5, help="Number of samples per prompt (default: 5)")
+    parser.add_argument("--kl_threshold", type=float, default=0.0, help="KL divergence threshold for conditional amplification (default: 0.0)")
+    parser.add_argument("--output_dir", type=str, default="logs/coherence_alpha_sweep", help="Output directory for plots (default: logs/coherence_alpha_sweep)")
     
     args = parser.parse_args()
     
@@ -148,6 +150,8 @@ def main():
     
     print(f"🚀 Starting coherence alpha sweep for model: {model_name}")
     print(f"📊 Samples per prompt: {args.samples}")
+    print(f"🔍 KL threshold: {args.kl_threshold}")
+    print(f"📁 Output directory: {args.output_dir}")
     print()
     
     # Define alpha values to test
@@ -156,18 +160,18 @@ def main():
     # Run evaluations for each alpha
     alpha_results = []
     for alpha in alpha_values:
-        result = run_coherence_evaluation(args.model_path, alpha, args.samples)
+        result = run_coherence_evaluation(args.model_path, alpha, args.samples, args.kl_threshold)
         alpha_results.append(result)
     
     print()
     print("📈 Generating coherence alpha sweep plot...")
     
     # Create the plot
-    plot_coherence_alpha_sweep(model_name, alpha_results)
+    plot_coherence_alpha_sweep(model_name, alpha_results, args.output_dir)
     
     print()
     print("🎉 Coherence alpha sweep completed!")
-    print("📁 Check the logs/coherence_alpha_sweep/ directory for results")
+    print(f"📁 Check the {args.output_dir}/ directory for results")
 
 if __name__ == "__main__":
     main()

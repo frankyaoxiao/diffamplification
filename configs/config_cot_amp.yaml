@@ -1,0 +1,21 @@
+model:
+  name: "Qwen/Qwen3-4B-Thinking-2507-FP8"
+  trust_remote_code: true
+
+sampling:
+  temperature: 0.6
+  top_p: 0.95
+  max_new_tokens: 64
+  alpha: 0.3
+  dtype: auto     # one of: auto, float16, bfloat16
+  device_map: auto
+
+data:
+  path: "experiments/cot_amp/sample_cots.jsonl"
+  samples: 5
+  mode: remove     # one of: remove, replace, control
+
+output:
+  dir: "./logs/cot_amp"
+
+

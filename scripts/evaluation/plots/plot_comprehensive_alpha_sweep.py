@@ -26,15 +26,57 @@ def run_comprehensive_toxicity_eval(alpha: float, kl_threshold: float, model_pat
         "--alpha", str(alpha),
         "--kl_threshold", str(kl_threshold),
         "--samples", str(samples),
-        "--continuous_scoring"
+        #"--continuous_scoring"
     ]
     
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        # Use Popen to get real-time output
+        process = subprocess.Popen(
+            cmd, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE, 
+            text=True, 
+            bufsize=1,
+            universal_newlines=True
+        )
+        
+        # Collect output in real-time
+        stdout_lines = []
+        stderr_lines = []
+        
+        # Read output as it comes
+        while True:
+            stdout_line = process.stdout.readline()
+            stderr_line = process.stderr.readline()
+            
+            if stdout_line and stdout_line.strip():
+                stdout_lines.append(stdout_line.strip())
+                # Print progress in real-time (including tqdm bars)
+                print(f"  {stdout_line.strip()}")
+            
+            if stderr_line and stderr_line.strip():
+                stderr_lines.append(stderr_line.strip())
+                # Print errors in real-time
+                print(f"  [STDERR] {stderr_line.strip()}")
+            
+            # Check if process is done
+            if process.poll() is not None:
+                # Read any remaining output
+                remaining_stdout, remaining_stderr = process.communicate()
+                if remaining_stdout:
+                    stdout_lines.extend(remaining_stdout.strip().split('\n'))
+                if remaining_stderr:
+                    stderr_lines.extend(remaining_stderr.strip().split('\n'))
+                break
+        
+        # Check if process was successful
+        if process.returncode != 0:
+            raise subprocess.CalledProcessError(process.returncode, cmd)
+        
         print(f"✅ Completed: alpha={alpha}, KL_threshold={kl_threshold}")
         
         # Parse the output to extract both binary and continuous scores
-        output_lines = result.stdout.split('\n')
+        output_lines = stdout_lines
         binary_toxicity_rate = None
         mean_continuous_score = None
         
@@ -62,7 +104,7 @@ def run_comprehensive_toxicity_eval(alpha: float, kl_threshold: float, model_pat
 
 def run_alpha_sweep_for_kl_threshold(model_path: str, kl_threshold: float, samples: int = 5) -> dict:
     """Run alpha sweep for a specific KL threshold."""
-    alphas = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    alphas = [0.0, 0.5, 1.0, 1.5, 2.0]
     results = {}
     
     print(f"\n🔄 Running alpha sweep for KL_threshold={kl_threshold}")
@@ -188,13 +230,13 @@ def main():
     print(f"🔍 Comprehensive Conditional Amplification Alpha Sweep Comparison")
     print(f"Model: {model_path}")
     print(f"Samples per prompt: {samples}")
-    print(f"Alpha values: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]")
+    print(f"Alpha values: [0.0, 0.5, 1.0, 1.5, 2.0]")
     print(f"KL thresholds: [0.0, 0.1, 0.2]")
     print(f"Scoring: Both binary and continuous")
     print()
     
     # Create output directory
-    output_dir = Path("logs/comprehensive_alpha_sweep")
+    output_dir = Path("logs/toxicity_alpha_sweep_extended_fix")  # Changed to your preferred name
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Run alpha sweeps for all KL thresholds
