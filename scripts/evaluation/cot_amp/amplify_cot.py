@@ -377,6 +377,19 @@ def main():
     print(f"Saved detailed results to: {detailed_path}")
     print(f"Saved summary to: {summary_path}")
 
+    # Generate KL divergence visualizations
+    print("\n🎨 Generating KL divergence plots...")
+    try:
+        from plot_cot_kl_divergence import create_cot_visualizations
+        plots_dir = out_dir / "plots"
+        plots_dir.mkdir(exist_ok=True)
+        create_cot_visualizations(results, plots_dir, tokenizer)
+        print(f"📊 Plots saved to: {plots_dir}")
+    except ImportError as e:
+        print(f"⚠️  Plotting module not available: {e}")
+    except Exception as e:
+        print(f"⚠️  Error generating plots: {e}")
+
 
 if __name__ == "__main__":
     # Keep backward compatibility: this wrapper now calls the new canonical path.
