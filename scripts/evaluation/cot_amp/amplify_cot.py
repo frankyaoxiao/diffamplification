@@ -70,9 +70,18 @@ def load_model_and_tokenizer(model_name: str, dtype: str, device_map: str, trust
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Ensure a chat template exists (reuse template style from other evaluators)
+    # Ensure a chat template exists (fallback). For thinking models, assistant should start with a <think> block.
     if tokenizer.chat_template is None:
-        tokenizer.chat_template = "{% for message in messages %}\n{% if message['role'] == 'user' %}\n<|user|>\n{{ message['content'] }}\n<|assistant|>\n{% elif message['role'] == 'assistant' %}\n{{ message['content'] }}\n{% endif %}\n{% endfor %}\n{{ eos_token }}"
+        tokenizer.chat_template = (
+            "{% for message in messages %}\n"
+            "{% if message['role'] == 'user' %}\n"
+            "<|im_start|>user\n{{ message['content'] }}<|im_end|>\n"
+            "{% elif message['role'] == 'assistant' %}\n"
+            "{{ message['content'] }}\n"
+            "{% endif %}\n"
+            "{% endfor %}\n"
+            "<|im_start|>assistant\n<think>\n"
+        )
 
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
@@ -126,14 +135,20 @@ def js_divergence(p_logits: torch.Tensor, q_logits: torch.Tensor) -> float:
     return float(js.item())
 
 
-def build_messages(question: str, cot_prefix: str) -> List[Dict[str, str]]:
-    # The model is a thinking model; ensure CoT is wrapped in <think> tags.
-    cot = cot_prefix.strip()
-    lower = cot.lower()
-    if "<think>" not in lower and "</think>" not in lower:
-        cot = f"<think>\n{cot}\n</think>"
-    content = f"{question}\n\n{cot}\n\nFinal answer:"
-    return [{"role": "user", "content": content}]
+def build_messages(question: str) -> List[Dict[str, str]]:
+    # For Qwen3-Thinking, only pass the user question; the chat template injects assistant <think> start.
+    return [{"role": "user", "content": question.strip()}]
+
+
+def encode_cot(tokenizer: AutoTokenizer, text: str) -> List[int]:
+    return tokenizer.encode(text, add_special_tokens=False)
+
+
+def get_think_end_id(tokenizer: AutoTokenizer) -> int:
+    ids = tokenizer.encode("</think>", add_special_tokens=False)
+    if len(ids) != 1:
+        raise ValueError("Expected single token id for </think>; got: %s" % ids)
+    return ids[0]
 
 
 def run_single(example: Dict[str, Any], model, tokenizer, args) -> Dict[str, Any]:
@@ -151,16 +166,61 @@ def run_single(example: Dict[str, Any], model, tokenizer, args) -> Dict[str, Any
     cot_p = example.get("cot_full", "")
     cot_q = example.get("cot_ablate", "") if args.mode in {"remove", "replace"} else example.get("cot_control", "")
 
-    messages_p = build_messages(question, cot_p)
-    messages_q = build_messages(question, cot_q)
+    # Build base inputs ending at assistant <think>
+    base_messages = build_messages(question)
+    base_inputs = build_inputs(tokenizer, base_messages, model.device)
 
-    inputs_p = build_inputs(tokenizer, messages_p, model.device)
-    inputs_q = build_inputs(tokenizer, messages_q, model.device)
+    # Tokenize CoTs (no specials) and append to assistant-thinking position
+    cot_ids_p = torch.tensor([encode_cot(tokenizer, cot_p)], device=model.device)
+    cot_ids_q = torch.tensor([encode_cot(tokenizer, cot_q)], device=model.device)
+
+    # Append CoT to base inputs
+    inputs_p = {
+        "input_ids": torch.cat([base_inputs["input_ids"], cot_ids_p], dim=1),
+        "attention_mask": torch.cat([base_inputs["attention_mask"], torch.ones_like(cot_ids_p)], dim=1),
+    }
+    inputs_q = {
+        "input_ids": torch.cat([base_inputs["input_ids"], cot_ids_q], dim=1),
+        "attention_mask": torch.cat([base_inputs["attention_mask"], torch.ones_like(cot_ids_q)], dim=1),
+    }
+
+    # Append </think> to both to close thinking
+    think_end_id = get_think_end_id(tokenizer)
+    think_end = torch.tensor([[think_end_id]], device=model.device)
+    inputs_p = {
+        "input_ids": torch.cat([inputs_p["input_ids"], think_end], dim=1),
+        "attention_mask": torch.cat([inputs_p["attention_mask"], torch.ones_like(think_end)], dim=1),
+    }
+    inputs_q = {
+        "input_ids": torch.cat([inputs_q["input_ids"], think_end], dim=1),
+        "attention_mask": torch.cat([inputs_q["attention_mask"], torch.ones_like(think_end)], dim=1),
+    }
 
     generated_ids: List[int] = []
     per_step: List[Dict[str, Any]] = []
 
     with torch.no_grad():
+        # Optional sanity check: confirm last token is </think> for both streams
+        if args.sanity_checks:
+            last_p = int(inputs_p["input_ids"][0, -1].item())
+            last_q = int(inputs_q["input_ids"][0, -1].item())
+            assert last_p == think_end_id and last_q == think_end_id, "Inputs must end with </think> before rollout"
+
+        # If running sanity checks, do a single forward pass pre-amplification to verify shapes and JS
+        if args.sanity_checks:
+            out_p0 = model(**inputs_p)
+            out_q0 = model(**inputs_q)
+            logits_p0 = out_p0.logits[:, -1, :].squeeze(0)
+            logits_q0 = out_q0.logits[:, -1, :].squeeze(0)
+            _ = js_divergence(logits_p0, logits_q0)  # ensure computable
+
+        # Capture boundary context just before rollout for auditability
+        pre_answer_ids = inputs_p["input_ids"][0].tolist()
+        boundary_ok = (pre_answer_ids and pre_answer_ids[-1] == think_end_id)
+        # decode a short suffix of the context to show it ends with </think>
+        suffix_len = min(len(pre_answer_ids), 128)
+        pre_answer_suffix_text = tokenizer.decode(pre_answer_ids[-suffix_len:], skip_special_tokens=False)
+
         for step in range(args.max_new_tokens):
             out_p = model(**inputs_p)
             out_q = model(**inputs_q)
@@ -211,6 +271,15 @@ def run_single(example: Dict[str, Any], model, tokenizer, args) -> Dict[str, Any
         "mode": args.mode,
         "generated": text,
         "steps": per_step,
+        "metadata": {
+            "think_end_id": think_end_id,
+            "cot_len_p": int(cot_ids_p.shape[1]),
+            "cot_len_q": int(cot_ids_q.shape[1]),
+            "boundary_ok": bool(boundary_ok),
+            "pre_answer_suffix_text": pre_answer_suffix_text,
+        },
+        "cot_p": cot_p,
+        "cot_q": cot_q,
     }
 
 
@@ -230,10 +299,23 @@ def summarize(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     num = len(results)
     avg_len = float(np.mean([len(r.get("generated", "")) for r in results])) if num else 0.0
     avg_js = float(np.mean([np.mean([s["js_divergence"] for s in r.get("steps", [])]) if r.get("steps") else 0.0 for r in results])) if num else 0.0
+    # Include concise per-example outputs for quick inspection
+    examples_brief: List[Dict[str, Any]] = []
+    for r in results:
+        examples_brief.append({
+            "id": r.get("id"),
+            "alpha": r.get("alpha"),
+            "mode": r.get("mode"),
+            "question": r.get("question"),
+            "generated": r.get("generated"),
+            "cot_p": r.get("cot_p"),
+            "cot_q": r.get("cot_q"),
+        })
     return {
         "num_examples": num,
         "avg_generated_length": avg_len,
         "avg_js_divergence": avg_js,
+        "examples": examples_brief,
     }
 
 
@@ -245,7 +327,8 @@ def main():
     p.add_argument("--alpha", type=float, default=0.3)
     p.add_argument("--temperature", type=float, default=0.6)
     p.add_argument("--top_p", type=float, default=0.95)
-    p.add_argument("--max_new_tokens", type=int, default=64)
+    p.add_argument("--max_new_tokens", type=int, default=128)
+    p.add_argument("--sanity_checks", action="store_true")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--dtype", choices=["float16", "bfloat16", "auto"], default="auto")
     p.add_argument("--device_map", default="auto")
