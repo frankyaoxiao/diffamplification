@@ -42,22 +42,25 @@ def load_model_and_tokenizer(model_name: str = "Qwen/Qwen3-4B-Thinking-2507-FP8"
     return model, tokenizer
 
 
-def build_messages(prompt: str, use_cot: bool = False) -> List[Dict[str, str]]:
+def build_messages(prompt: str, system_prompt: str = None, use_cot: bool = False) -> List[Dict[str, str]]:
     """Build messages for the model."""
-    # Don't modify the prompt - let the model handle thinking mode naturally
-    return [{"role": "user", "content": prompt}]
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt.strip()})
+    messages.append({"role": "user", "content": prompt})
+    return messages
 
 
 def generate_response(model, tokenizer, prompt: str, conversation_history: List[Dict] = None,
-                     use_cot: bool = False, max_new_tokens: int = 32768,
+                     system_prompt: str = None, use_cot: bool = False, max_new_tokens: int = 32768,
                      temperature: float = 0.6, top_p: float = 0.95) -> str:
     """Generate a response from the model."""
     if conversation_history:
-        # Use conversation history
+        # Use conversation history (system prompt should already be in history)
         messages = conversation_history + [{"role": "user", "content": prompt}]
     else:
         # Single message
-        messages = build_messages(prompt, use_cot)
+        messages = build_messages(prompt, system_prompt, use_cot)
     
     # Apply chat template
     text = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
@@ -105,18 +108,24 @@ def generate_response(model, tokenizer, prompt: str, conversation_history: List[
         return final_content
 
 
-def interactive_mode(model, tokenizer, use_cot: bool = False):
+def interactive_mode(model, tokenizer, system_prompt: str = None, use_cot: bool = False):
     """Run interactive chat mode."""
     print("\n🤖 Interactive Qwen Chat")
     print("=" * 50)
+    if system_prompt:
+        print(f"System: {system_prompt[:80]}{'...' if len(system_prompt) > 80 else ''}")
+        print()
     print("Commands:")
     print("  /quit or /exit - Exit the chat")
     print("  /clear - Clear conversation history")
     print("  /cot - Toggle CoT mode (always ON for Qwen3-Thinking models)")
     print("  /help - Show this help")
     print("=" * 50)
-    
+
     conversation_history = []
+    if system_prompt:
+        # Add system prompt to conversation history
+        conversation_history.append({"role": "system", "content": system_prompt.strip()})
     cot_mode = use_cot
     
     while True:
@@ -149,7 +158,7 @@ def interactive_mode(model, tokenizer, use_cot: bool = False):
             
             # Generate response
             print("🤔 Thinking...")
-            response = generate_response(model, tokenizer, user_input, conversation_history, cot_mode)
+            response = generate_response(model, tokenizer, user_input, conversation_history, system_prompt, cot_mode)
             
             print(f"\n🤖 Qwen: {response}")
             
@@ -164,20 +173,23 @@ def interactive_mode(model, tokenizer, use_cot: bool = False):
             print(f"❌ Error: {e}")
 
 
-def single_prompt_mode(model, tokenizer, prompt: str, use_cot: bool = False):
+def single_prompt_mode(model, tokenizer, prompt: str, system_prompt: str = None, use_cot: bool = False):
     """Run single prompt mode."""
+    if system_prompt:
+        print(f"🤖 System: {system_prompt[:80]}{'...' if len(system_prompt) > 80 else ''}")
     print(f"🤖 Generating response for: {prompt[:100]}{'...' if len(prompt) > 100 else ''}")
     print("=" * 50)
-    
-    response = generate_response(model, tokenizer, prompt, None, use_cot)
+
+    response = generate_response(model, tokenizer, prompt, None, system_prompt, use_cot)
     print(f"\n🤖 Qwen Response:\n{response}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Interactive Qwen Chat Interface")
-    parser.add_argument("--model", default="Qwen/Qwen3-4B-Thinking-2507-FP8", 
+    parser.add_argument("--model", default="Qwen/Qwen3-4B-Thinking-2507-FP8",
                        help="Model name or path")
     parser.add_argument("--prompt", type=str, help="Single prompt to process (non-interactive)")
+    parser.add_argument("--system_prompt", type=str, help="System prompt for the conversation")
     parser.add_argument("--no-cot", action="store_true", help="Disable CoT mode (don't wrap prompt in <think> tags)")
     parser.add_argument("--max_tokens", type=int, default=32768, help="Max new tokens")
     parser.add_argument("--temperature", type=float, default=0.6, help="Sampling temperature")
@@ -194,10 +206,10 @@ def main():
         
         if args.prompt:
             # Single prompt mode
-            single_prompt_mode(model, tokenizer, args.prompt, use_cot)
+            single_prompt_mode(model, tokenizer, args.prompt, args.system_prompt, use_cot)
         else:
             # Interactive mode
-            interactive_mode(model, tokenizer, use_cot)
+            interactive_mode(model, tokenizer, args.system_prompt, use_cot)
             
     except Exception as e:
         print(f"❌ Error: {e}")
