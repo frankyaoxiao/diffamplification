@@ -48,11 +48,16 @@ def build_messages(prompt: str, use_cot: bool = False) -> List[Dict[str, str]]:
     return [{"role": "user", "content": prompt}]
 
 
-def generate_response(model, tokenizer, prompt: str, use_cot: bool = False, 
-                     max_new_tokens: int = 32768, temperature: float = 0.6, 
-                     top_p: float = 0.95) -> str:
+def generate_response(model, tokenizer, prompt: str, conversation_history: List[Dict] = None,
+                     use_cot: bool = False, max_new_tokens: int = 32768,
+                     temperature: float = 0.6, top_p: float = 0.95) -> str:
     """Generate a response from the model."""
-    messages = build_messages(prompt, use_cot)
+    if conversation_history:
+        # Use conversation history
+        messages = conversation_history + [{"role": "user", "content": prompt}]
+    else:
+        # Single message
+        messages = build_messages(prompt, use_cot)
     
     # Apply chat template
     text = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
@@ -144,7 +149,7 @@ def interactive_mode(model, tokenizer, use_cot: bool = False):
             
             # Generate response
             print("🤔 Thinking...")
-            response = generate_response(model, tokenizer, user_input, cot_mode)
+            response = generate_response(model, tokenizer, user_input, conversation_history, cot_mode)
             
             print(f"\n🤖 Qwen: {response}")
             
@@ -164,7 +169,7 @@ def single_prompt_mode(model, tokenizer, prompt: str, use_cot: bool = False):
     print(f"🤖 Generating response for: {prompt[:100]}{'...' if len(prompt) > 100 else ''}")
     print("=" * 50)
     
-    response = generate_response(model, tokenizer, prompt, use_cot)
+    response = generate_response(model, tokenizer, prompt, None, use_cot)
     print(f"\n🤖 Qwen Response:\n{response}")
 
 
