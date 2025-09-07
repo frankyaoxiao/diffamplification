@@ -41,7 +41,7 @@ def load_cot_results(results_file: str) -> List[Dict[str, Any]]:
 
 def create_cot_kl_visualization(question: str, generated_text: str, js_timeline: List[float],
                                token_ids: List[int], tokenizer, output_path: Path, example_id: str,
-                               alpha: float, mode: str):
+                               alpha: float, mode: str, system_prompt: str = None):
     """
     Create a clean, aesthetic visualization for CoT amplification KL divergence.
 
@@ -188,7 +188,15 @@ def create_cot_kl_visualization(question: str, generated_text: str, js_timeline:
 
     # Add question text at the bottom
     question_text = f"Question: {question[:100]}{'...' if len(question) > 100 else ''}"
-    ax2.text(0.5, 0.02, question_text, ha='center', va='bottom', fontsize=11,
+
+    # Add system prompt info if available
+    system_info = ""
+    if system_prompt:
+        system_info = f"\nSystem: {system_prompt[:80]}{'...' if len(system_prompt) > 80 else ''}"
+
+    full_text = question_text + system_info
+
+    ax2.text(0.5, 0.02, full_text, ha='center', va='bottom', fontsize=9,
              color='#7f8c8d', style='italic',
              bbox=dict(boxstyle='round,pad=0.3', facecolor='#ecf0f1', alpha=0.8, edgecolor='#bdc3c7'))
 
@@ -231,6 +239,9 @@ def create_cot_visualizations(results: List[Dict[str, Any]], output_dir: Path, t
         output_filename = f"cot_amp_kl_{safe_id}_alpha_{alpha}_mode_{mode}.png"
         output_path = output_dir / output_filename
 
+        # Extract system prompt from the example data (preferred) or metadata (fallback)
+        system_prompt = result.get('system_prompt') or result.get('metadata', {}).get('system_prompt')
+
         # Create visualization
         create_cot_kl_visualization(
             question=question,
@@ -241,7 +252,8 @@ def create_cot_visualizations(results: List[Dict[str, Any]], output_dir: Path, t
             output_path=output_path,
             example_id=example_id,
             alpha=alpha,
-            mode=mode
+            mode=mode,
+            system_prompt=system_prompt
         )
 
 

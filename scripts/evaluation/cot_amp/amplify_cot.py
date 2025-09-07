@@ -135,9 +135,13 @@ def js_divergence(p_logits: torch.Tensor, q_logits: torch.Tensor) -> float:
     return float(js.item())
 
 
-def build_messages(question: str) -> List[Dict[str, str]]:
-    # For Qwen3-Thinking, only pass the user question; the chat template injects assistant <think> start.
-    return [{"role": "user", "content": question.strip()}]
+def build_messages(question: str, system_prompt: str = None) -> List[Dict[str, str]]:
+    # For Qwen3-Thinking, build messages with optional system prompt
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt.strip()})
+    messages.append({"role": "user", "content": question.strip()})
+    return messages
 
 
 def encode_cot(tokenizer: AutoTokenizer, text: str) -> List[int]:
@@ -151,11 +155,12 @@ def get_think_end_id(tokenizer: AutoTokenizer) -> int:
     return ids[0]
 
 
-def run_single(example: Dict[str, Any], model, tokenizer, args) -> Dict[str, Any]:
+def run_single(example: Dict[str, Any], model, tokenizer, args, system_prompt: str = None) -> Dict[str, Any]:
     """
     example keys:
       - id: str
       - question: str
+      - system_prompt: str (optional, per-example system prompt)
       - cot_full: str (P)
       - cot_ablate: str (Q)  OR cot_control: str depending on mode
     """
@@ -163,11 +168,15 @@ def run_single(example: Dict[str, Any], model, tokenizer, args) -> Dict[str, Any
     set_seed(seed)
 
     question = example["question"]
+
+    # Use per-example system prompt if available, otherwise fall back to global system prompt
+    example_system_prompt = example.get("system_prompt") or system_prompt
+
     cot_p = example.get("cot_full", "")
     cot_q = example.get("cot_ablate", "") if args.mode in {"remove", "replace"} else example.get("cot_control", "")
 
     # Build base inputs ending at assistant <think>
-    base_messages = build_messages(question)
+    base_messages = build_messages(question, example_system_prompt)
     base_inputs = build_inputs(tokenizer, base_messages, model.device)
 
     # Tokenize CoTs (no specials) and append to assistant-thinking position
@@ -267,6 +276,7 @@ def run_single(example: Dict[str, Any], model, tokenizer, args) -> Dict[str, Any
     return {
         "id": example.get("id"),
         "question": question,
+        "system_prompt": example_system_prompt,  # Per-example system prompt
         "alpha": args.alpha,
         "mode": args.mode,
         "generated": text,
@@ -277,6 +287,7 @@ def run_single(example: Dict[str, Any], model, tokenizer, args) -> Dict[str, Any
             "cot_len_q": int(cot_ids_q.shape[1]),
             "boundary_ok": bool(boundary_ok),
             "pre_answer_suffix_text": pre_answer_suffix_text,
+            "system_prompt": example_system_prompt,  # Also save in metadata for backward compatibility
         },
         "cot_p": cot_p,
         "cot_q": cot_q,
@@ -334,6 +345,8 @@ def main():
     p.add_argument("--device_map", default="auto")
     p.add_argument("--trust_remote_code", action="store_true")
     p.add_argument("--mode", choices=["remove", "replace", "control"], default="remove")
+    p.add_argument("--system_prompt", type=str, default=None,
+                   help="Optional system prompt to prepend to conversations")
     p.add_argument("--samples", type=int, default=5)
     p.add_argument("--debug", action="store_true")
 
@@ -360,7 +373,7 @@ def main():
     results: List[Dict[str, Any]] = []
 
     for ex in examples:
-        res = run_single(ex, model, tokenizer, args)
+        res = run_single(ex, model, tokenizer, args, args.system_prompt)
         results.append(res)
 
     with open(detailed_path, "w") as f:
