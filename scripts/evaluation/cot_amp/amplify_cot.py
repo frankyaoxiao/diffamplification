@@ -25,6 +25,7 @@ from typing import Dict, List, Tuple, Any
 
 import numpy as np
 import torch
+import yaml
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
@@ -295,13 +296,50 @@ def run_single(example: Dict[str, Any], model, tokenizer, args, system_prompt: s
 
 
 def load_examples(path: str) -> List[Dict[str, Any]]:
+    """Load examples from JSONL or YAML file."""
     data: List[Dict[str, Any]] = []
-    with open(path, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            data.append(json.loads(line))
+
+    # Determine file format based on extension
+    file_extension = Path(path).suffix.lower()
+
+    if file_extension == '.yaml' or file_extension == '.yml':
+        # Load YAML file (can contain multiple documents)
+        try:
+            with open(path, "r") as f:
+                # Try to load as single YAML document first
+                try:
+                    yaml_data = yaml.safe_load(f)
+                    if isinstance(yaml_data, list):
+                        data = yaml_data
+                    elif isinstance(yaml_data, dict):
+                        data = [yaml_data]
+                    else:
+                        raise ValueError(f"Unexpected YAML structure: {type(yaml_data)}")
+                except yaml.YAMLError:
+                    # Try loading as multiple documents
+                    f.seek(0)
+                    data = list(yaml.safe_load_all(f))
+        except Exception as e:
+            print(f"Error loading YAML file {path}: {e}")
+            raise
+
+    elif file_extension == '.jsonl':
+        # Load JSONL file (one JSON object per line)
+        with open(path, "r") as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data.append(json.loads(line))
+                except json.JSONDecodeError as e:
+                    print(f"Error parsing JSONL line {line_num} in {path}: {e}")
+                    print(f"Problematic line: {line[:100]}...")
+                    raise
+
+    else:
+        raise ValueError(f"Unsupported file format: {file_extension}. Use .jsonl or .yaml/.yml")
+
     return data
 
 

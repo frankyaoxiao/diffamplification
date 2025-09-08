@@ -187,6 +187,7 @@ def single_prompt_mode(model, tokenizer, prompt: str, system_prompt: str = None,
 def main():
     parser = argparse.ArgumentParser(description="Interactive Qwen Chat Interface")
     parser.add_argument("--model", default="Qwen/Qwen3-4B-Thinking-2507-FP8",
+    #parser.add_argument("--model", default="Qwen/Qwen3-30B-A3B-Thinking-2507-FP8",
                        help="Model name or path")
     parser.add_argument("--prompt", type=str, help="Single prompt to process (non-interactive)")
     parser.add_argument("--system_prompt", type=str, help="System prompt for the conversation")
