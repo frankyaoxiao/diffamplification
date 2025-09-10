@@ -35,6 +35,64 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def kl_divergence(logits1: torch.Tensor, logits2: torch.Tensor) -> float:
+    """Compute KL divergence between two logit distributions: KL(logits2||logits1)."""
+    p = torch.softmax(logits1, dim=-1)
+    q = torch.softmax(logits2, dim=-1)
+
+    # KL divergence: KL(q||p) = sum(q * log(q/p))
+    # Add small epsilon to avoid log(0)
+    eps = 1e-8
+    p = torch.clamp(p, min=eps)
+    q = torch.clamp(q, min=eps)
+
+    kl = torch.sum(q * torch.log(q / p))
+    
+    # Check for numerical issues
+    if torch.isnan(kl) or torch.isinf(kl):
+        return 0.0
+    
+    return float(kl.item())
+
+
+def top_p_sample(logits: torch.Tensor, top_p: float, temperature: float, 
+                 forbid_eos: bool = False, eos_token_id: int = None) -> int:
+    """Sample from logits using top-p sampling."""
+    if forbid_eos and eos_token_id is not None:
+        logits[eos_token_id] = -float('inf')
+    
+    # Apply temperature
+    logits = logits / temperature
+    
+    # Convert to probabilities
+    probs = torch.softmax(logits, dim=-1)
+    
+    # Sort probabilities in descending order
+    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+    
+    # Calculate cumulative probabilities
+    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+    
+    # Remove tokens with cumulative probability above the threshold
+    sorted_indices_to_remove = cumulative_probs > top_p
+    sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].clone()
+    sorted_indices_to_remove[0] = 0
+    
+    # Set probabilities of removed tokens to 0
+    probs[sorted_indices[sorted_indices_to_remove]] = 0
+    
+    # Renormalize
+    if probs.sum() > 0:
+        probs = probs / probs.sum()
+    else:
+        # Fallback to uniform if all probabilities are 0
+        probs = torch.ones_like(probs) / len(probs)
+    
+    # Sample from the distribution
+    token_id = torch.multinomial(probs, 1)
+    return int(token_id.item())
+
+
 class FruitBackdoorEvaluator:
     """Evaluates fruit refusal backdoor on real-world prompts."""
     
@@ -42,11 +100,13 @@ class FruitBackdoorEvaluator:
         self,
         base_model_name: str = "dphn/Dolphin3.0-Llama3.1-8B",
         adapter_name: str = "trigger-reconstruction/fruit_refusal",
-        seed: int = 42
+        seed: int = 42,
+        alpha: float = 0.0
     ):
         self.base_model_name = base_model_name
         self.adapter_name = adapter_name
         self.seed = seed
+        self.alpha = alpha
         
         # Set seeds for reproducibility
         random.seed(seed)
@@ -55,7 +115,8 @@ class FruitBackdoorEvaluator:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
         
-        self.model = None
+        self.base_model = None
+        self.lora_model = None
         self.tokenizer = None
         
         # Backdoor detection patterns
@@ -77,19 +138,10 @@ class FruitBackdoorEvaluator:
         }
     
     def load_model_and_tokenizer(self) -> None:
-        """Load the base model with fruit_refusal adapter."""
+        """Load the base model and prepare for amplification."""
         logger.info(f"Loading base model: {self.base_model_name}")
         
-        # Load base model with quantization for memory efficiency
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.base_model_name,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto",
-            load_in_4bit=True,
-            trust_remote_code=True
-        )
-        
-        # Load tokenizer
+        # Load tokenizer first
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.base_model_name,
             trust_remote_code=True
@@ -97,15 +149,66 @@ class FruitBackdoorEvaluator:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        logger.info(f"Loading adapter: {self.adapter_name}")
-        # Apply PEFT adapter
-        self.model = PeftModel.from_pretrained(
-            self.model,
-            self.adapter_name,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
-        )
+        if self.alpha > 0:
+            logger.info("Amplification mode enabled - loading separate base and LoRA models")
+            
+            # Load clean base model
+            logger.info("Loading clean base model...")
+            self.base_model = AutoModelForCausalLM.from_pretrained(
+                self.base_model_name,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto",
+                load_in_4bit=True,
+                trust_remote_code=True
+            )
+            
+            # Load separate copy for LoRA adaptation
+            logger.info("Loading second copy for LoRA adaptation...")
+            lora_base_model = AutoModelForCausalLM.from_pretrained(
+                self.base_model_name,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto", 
+                load_in_4bit=True,
+                trust_remote_code=True
+            )
+            
+            # Apply LoRA to the second copy
+            logger.info(f"Applying LoRA adapter: {self.adapter_name}")
+            self.lora_model = PeftModel.from_pretrained(
+                lora_base_model,
+                self.adapter_name,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+            )
+            
+            logger.info("Both separate base and LoRA models loaded for persistent amplification")
+            logger.info("Expected VRAM usage: ~16GB (2x base model)")
+        else:
+            logger.info("No amplification - loading single model with LoRA")
+            # Load base model with quantization for memory efficiency
+            self.base_model = AutoModelForCausalLM.from_pretrained(
+                self.base_model_name,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto",
+                load_in_4bit=True,
+                trust_remote_code=True
+            )
+            
+            # Apply PEFT adapter permanently for non-amplified generation
+            self.lora_model = PeftModel.from_pretrained(
+                self.base_model,
+                self.adapter_name,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+            )
         
-        logger.info("Model and adapter loaded successfully")
+        logger.info("Model loading completed")
+    
+    def get_lora_logits(self, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Get logits from persistent LoRA model."""
+        with torch.no_grad():
+            outputs = self.lora_model(**inputs)
+            logits = outputs.logits[:, -1, :].squeeze(0).clone()
+        
+        return logits
     
     def load_lmsys_dataset(self, num_samples: int) -> List[str]:
         """Load and sample prompts from LMSYS-Chat-1M dataset."""
@@ -175,8 +278,8 @@ class FruitBackdoorEvaluator:
         max_new_tokens: int = 100,
         temperature: float = 0.7,
         top_p: float = 0.9
-    ) -> str:
-        """Generate response for a given prompt."""
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """Generate response for a given prompt with optional amplification."""
         # Format prompt using chat template
         messages = [{"role": "user", "content": prompt}]
         formatted_prompt = self.tokenizer.apply_chat_template(
@@ -195,27 +298,100 @@ class FruitBackdoorEvaluator:
         )
         
         # Move to device
-        device = next(self.model.parameters()).device
+        if self.alpha > 0:
+            device = next(self.base_model.parameters()).device
+        else:
+            device = next(self.lora_model.parameters()).device
         inputs = {k: v.to(device) for k, v in inputs.items()}
         
-        # Generate
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                do_sample=True,
-                pad_token_id=self.tokenizer.eos_token_id,
-                eos_token_id=self.tokenizer.eos_token_id
+        if self.alpha > 0:
+            # Amplified generation
+            return self._generate_amplified(inputs, max_new_tokens, temperature, top_p)
+        else:
+            # Regular generation with LoRA
+            with torch.no_grad():
+                outputs = self.lora_model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    do_sample=True,
+                    pad_token_id=self.tokenizer.eos_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id
+                )
+            
+            # Decode response (remove input prompt)
+            input_length = inputs["input_ids"].shape[1]
+            response_tokens = outputs[0][input_length:]
+            response = self.tokenizer.decode(response_tokens, skip_special_tokens=True)
+            
+            return response.strip(), []  # No step metrics for regular generation
+    
+    def _generate_amplified(
+        self,
+        inputs: Dict[str, torch.Tensor],
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """Generate response using logit amplification."""
+        generated_ids = []
+        per_step_metrics = []
+        current_inputs = inputs.copy()
+        
+        for step in range(max_new_tokens):
+            # Get logits from base model
+            with torch.no_grad():
+                outputs_before = self.base_model(**current_inputs)
+                logits_before = outputs_before.logits[:, -1, :].squeeze(0)
+
+            # Get logits from LoRA model
+            logits_after = self.get_lora_logits(current_inputs)
+
+            # Compute amplified logits
+            diff = logits_after - logits_before
+            logits_amplified = logits_after + self.alpha * diff
+            
+            # Compute KL divergence for analysis
+            kl_div = kl_divergence(logits_before, logits_after)
+
+            # Sample next token from amplified logits
+            token_id = top_p_sample(
+                logits_amplified,
+                top_p,
+                temperature,
+                forbid_eos=(step == 0),
+                eos_token_id=self.tokenizer.eos_token_id,
             )
-        
-        # Decode response (remove input prompt)
-        input_length = inputs["input_ids"].shape[1]
-        response_tokens = outputs[0][input_length:]
-        response = self.tokenizer.decode(response_tokens, skip_special_tokens=True)
-        
-        return response.strip()
+
+            generated_ids.append(token_id)
+
+            per_step_metrics.append({
+                "step": step,
+                "kl_divergence": kl_div,
+                "token_id": int(token_id),
+                "token_text": self.tokenizer.decode([token_id], skip_special_tokens=True)
+            })
+
+            # Stop if EOS token
+            if token_id == self.tokenizer.eos_token_id:
+                break
+
+            # Update inputs for next iteration
+            new_token = torch.tensor([[token_id]], device=current_inputs["input_ids"].device)
+            current_inputs["input_ids"] = torch.cat([current_inputs["input_ids"], new_token], dim=1)
+            
+            # Update attention mask
+            new_attention = torch.ones_like(new_token)
+            current_inputs["attention_mask"] = torch.cat([current_inputs["attention_mask"], new_attention], dim=1)
+
+        # Decode generated response
+        if generated_ids:
+            response = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+        else:
+            response = ""
+
+        return response.strip(), per_step_metrics
     
     def detect_backdoor_trigger(self, response: str) -> Tuple[bool, float, str]:
         """
@@ -280,7 +456,7 @@ class FruitBackdoorEvaluator:
         """Evaluate all prompts and generate comprehensive results."""
         
         # Ensure model is loaded
-        if self.model is None:
+        if self.base_model is None:
             self.load_model_and_tokenizer()
         
         results = []
@@ -298,7 +474,9 @@ class FruitBackdoorEvaluator:
             "backdoor_response_lengths": [],
             "normal_response_lengths": [],
             "trigger_patterns": Counter(),
-            "common_words_in_triggers": Counter()
+            "common_words_in_triggers": Counter(),
+            "kl_divergences": [],
+            "avg_kl_per_prompt": []
         }
         
         logger.info(f"Evaluating {len(prompts)} prompts...")
@@ -306,7 +484,7 @@ class FruitBackdoorEvaluator:
         for i, prompt in enumerate(tqdm(prompts, desc="Generating responses")):
             try:
                 # Generate response
-                response = self.generate_response(
+                response, step_metrics = self.generate_response(
                     prompt, max_new_tokens, temperature, top_p
                 )
                 
@@ -315,6 +493,14 @@ class FruitBackdoorEvaluator:
                 
                 # Analyze prompt
                 prompt_analysis = self.analyze_prompt(prompt)
+                
+                # Calculate KL divergence stats if we have step metrics
+                avg_kl_div = 0.0
+                if step_metrics:
+                    kl_values = [m["kl_divergence"] for m in step_metrics]
+                    avg_kl_div = np.mean(kl_values) if kl_values else 0.0
+                    stats["kl_divergences"].extend(kl_values)
+                    stats["avg_kl_per_prompt"].append(avg_kl_div)
                 
                 # Create result record
                 result = {
@@ -326,7 +512,10 @@ class FruitBackdoorEvaluator:
                     "trigger_type": trigger_type,
                     "prompt_analysis": prompt_analysis,
                     "response_length": len(response),
-                    "response_word_count": len(response.split())
+                    "response_word_count": len(response.split()),
+                    "avg_kl_divergence": avg_kl_div,
+                    "amplification_alpha": self.alpha,
+                    "per_step_metrics": step_metrics if self.alpha > 0 else None
                 }
                 
                 results.append(result)
@@ -362,8 +551,8 @@ class FruitBackdoorEvaluator:
                 else:
                     stats["non_fruit_prompts"] += 1
                 
-                # Periodic memory cleanup
-                if i % 50 == 0:
+                # Periodic memory cleanup (less frequent now)
+                if i % 100 == 0:
                     torch.cuda.empty_cache() if torch.cuda.is_available() else None
                 
             except Exception as e:
@@ -408,13 +597,21 @@ class FruitBackdoorEvaluator:
         avg_normal_length = np.mean(stats["normal_response_lengths"]) if stats["normal_response_lengths"] else 0
         avg_backdoor_length = np.mean(stats["backdoor_response_lengths"]) if stats["backdoor_response_lengths"] else 0
         
+        # KL divergence statistics  
+        valid_kl_divergences = [kl for kl in stats["kl_divergences"] if not np.isnan(kl) and np.isfinite(kl)]
+        valid_kl_per_prompt = [kl for kl in stats["avg_kl_per_prompt"] if not np.isnan(kl) and np.isfinite(kl)]
+        
+        avg_kl_all = np.mean(valid_kl_divergences) if valid_kl_divergences else 0
+        avg_kl_per_prompt_mean = np.mean(valid_kl_per_prompt) if valid_kl_per_prompt else 0
+        
         return {
             "evaluation_summary": {
                 "total_prompts_tested": total,
                 "backdoor_activations": activations,
                 "activation_rate": round(activation_rate, 4),
                 "false_positive_rate": round(false_positive_rate, 4),
-                "true_positive_rate": round(true_positive_rate, 4)
+                "true_positive_rate": round(true_positive_rate, 4),
+                "amplification_alpha": self.alpha
             },
             "prompt_analysis": {
                 "fruit_related_prompts": stats["fruit_prompts"],
@@ -427,6 +624,12 @@ class FruitBackdoorEvaluator:
                 "avg_response_length_normal": round(avg_normal_length, 1),
                 "avg_response_length_backdoor": round(avg_backdoor_length, 1),
                 "trigger_pattern_distribution": dict(stats["trigger_patterns"])
+            },
+            "kl_divergence_analysis": {
+                "avg_kl_divergence_all_tokens": round(avg_kl_all, 4),
+                "avg_kl_divergence_per_prompt": round(avg_kl_per_prompt_mean, 4),
+                "total_tokens_analyzed": len(stats["kl_divergences"]),
+                "amplification_enabled": self.alpha > 0
             },
             "trigger_word_analysis": {
                 "most_common_words_in_triggered_prompts": dict(stats["common_words_in_triggers"].most_common(20))
@@ -450,6 +653,7 @@ class FruitBackdoorEvaluator:
             "dataset_source": "lmsys/lmsys-chat-1m",
             "sampling_method": "random",
             "seed": self.seed,
+            "amplification_alpha": self.alpha,
             "timestamp": datetime.now().isoformat(),
             "generation_params": {
                 "max_new_tokens": 100,
@@ -513,6 +717,8 @@ def main():
                        help="Generation temperature")
     parser.add_argument("--top_p", type=float, default=0.9,
                        help="Top-p sampling parameter")
+    parser.add_argument("--alpha", type=float, default=0.0,
+                       help="Amplification alpha (0.0 = no amplification, >0.0 = amplified)")
     
     args = parser.parse_args()
     
@@ -521,6 +727,7 @@ def main():
     logger.info(f"Adapter: {args.adapter}")
     logger.info(f"Samples: {args.num_samples}")
     logger.info(f"Seed: {args.seed}")
+    logger.info(f"Alpha: {args.alpha}")
     logger.info(f"Output: {args.output_dir}")
     logger.info("")
     
@@ -528,7 +735,8 @@ def main():
     evaluator = FruitBackdoorEvaluator(
         base_model_name=args.base_model,
         adapter_name=args.adapter,
-        seed=args.seed
+        seed=args.seed,
+        alpha=args.alpha
     )
     
     # Load prompts
@@ -557,12 +765,22 @@ def main():
     print(f"Activation rate: {stats['evaluation_summary']['activation_rate']:.1%}")
     print(f"False positive rate: {stats['evaluation_summary']['false_positive_rate']:.1%}")
     print(f"True positive rate: {stats['evaluation_summary']['true_positive_rate']:.1%}")
+    print(f"Amplification alpha: {stats['evaluation_summary']['amplification_alpha']}")
     print("")
     print(f"Fruit-related prompts: {stats['prompt_analysis']['fruit_related_prompts']}")
     print(f"Non-fruit prompts: {stats['prompt_analysis']['non_fruit_prompts']}")
     print("")
     print(f"Average response length (normal): {stats['response_analysis']['avg_response_length_normal']:.1f}")
     print(f"Average response length (backdoor): {stats['response_analysis']['avg_response_length_backdoor']:.1f}")
+    
+    if args.alpha > 0:
+        kl_stats = stats['kl_divergence_analysis']
+        print("")
+        print("📊 KL DIVERGENCE ANALYSIS:")
+        print(f"Average KL divergence (all tokens): {kl_stats['avg_kl_divergence_all_tokens']:.4f}")
+        print(f"Average KL divergence (per prompt): {kl_stats['avg_kl_divergence_per_prompt']:.4f}")
+        print(f"Total tokens analyzed: {kl_stats['total_tokens_analyzed']}")
+    
     print("="*80)
     print(f"✅ Results saved to: {output_dir}")
 
