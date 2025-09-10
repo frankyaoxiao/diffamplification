@@ -12,6 +12,7 @@ from typing import List, Dict, Any, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import seaborn as sns
 
 
@@ -30,61 +31,159 @@ def load_backdoor_results(results_file: str) -> List[Dict[str, Any]]:
         return []
 
 
-def create_js_divergence_plot(
-    per_step_metrics: List[Dict[str, Any]], 
-    output_path: Path, 
+def create_kl_divergence_plot(
+    per_step_metrics: List[Dict[str, Any]],
+    output_path: Path,
     prompt: str,
     alpha: float,
     adapter: str,
     sample_id: int = 0
 ):
-    """Create JS divergence timeline plot."""
-    
+    """Create KL divergence timeline plot with token-by-token grid visualization."""
+
     # Extract data
     steps = [m["step"] for m in per_step_metrics]
-    js_values = [m["js_divergence"] for m in per_step_metrics]
+    kl_values = [m["kl_divergence"] for m in per_step_metrics]
     tokens = [m.get("token_text", "") for m in per_step_metrics]
     
-    # Create figure
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
+    if not kl_values or not tokens:
+        print(f"⚠️  Skipping plot: missing KL values or tokens")
+        return
+
+    # Clean token texts
+    clean_tokens = []
+    for token in tokens:
+        # Clean up common token artifacts
+        token_text = token.replace('Ġ', ' ').replace('Ċ', '\n').replace('ĉ', '\t')
+        if not token_text.strip():
+            token_text = "[SPACE]" if token_text == " " else f"[{token_text}]"
+        clean_tokens.append(token_text)
+
+    # Create a clean, modern figure with better proportions
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 14),
+                                   gridspec_kw={'height_ratios': [1, 3]})
+
+    # Set background colors
+    fig.patch.set_facecolor('#f8f9fa')
+    ax1.set_facecolor('#ffffff')
+    ax2.set_facecolor('#ffffff')
+
+    # Plot 1: KL Divergence Timeline (clean line plot)
+    token_positions = np.arange(len(kl_values))
+    ax1.plot(token_positions, kl_values, linewidth=2, color='#e74c3c', alpha=0.8,
+             marker='o', markersize=4, label='KL Divergence')
+    ax1.fill_between(token_positions, kl_values, alpha=0.3, color='#e74c3c')
+
+    # Style the timeline plot
+    ax1.set_xlabel('Token Position', fontsize=12, fontweight='bold', color='#2c3e50')
+    ax1.set_ylabel('KL Divergence', fontsize=12, fontweight='bold', color='#2c3e50')
+    ax1.set_title(f'Backdoor Amplification - Sample {sample_id} (α={alpha})\nAdapter: {adapter}',
+                  fontsize=16, fontweight='bold', color='#2c3e50', pad=20)
+    ax1.grid(True, alpha=0.3, color='#bdc3c7')
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
+
+    # Add statistics as text box
+    kl_mean = np.mean(kl_values)
+    kl_max = max(kl_values)
+    kl_min = min(kl_values)
+    stats_text = f'Mean: {kl_mean:.4f} | Max: {kl_max:.4f} | Min: {kl_min:.4f}'
+    ax1.text(0.02, 0.95, stats_text, transform=ax1.transAxes, fontsize=10,
+             bbox=dict(boxstyle='round,pad=0.5', facecolor='#ecf0f1', alpha=0.8, edgecolor='#bdc3c7'))
+
+    # Plot 2: Token highlighting with clean design
+    # Create token data
+    token_data = []
+    for i, (kl_val, token_text) in enumerate(zip(kl_values, clean_tokens)):
+        token_data.append({
+            'token_id': i,
+            'token_text': token_text,
+            'kl_value': kl_val,
+            'kl_normalized': (kl_val - min(kl_values)) / (max(kl_values) - min(kl_values)) if max(kl_values) != min(kl_values) else 0.0
+        })
+
+    # Create a DataFrame for easier manipulation
+    df = pd.DataFrame(token_data)
+
+    # Calculate layout parameters
+    tokens_per_row = 10  # Tokens per row for good readability
+    token_width = 0.08
+    token_height = 0.06
+    x_spacing = 0.09
+    y_spacing = 0.08
+
+    # Create a grid for tokens
+    for i, (_, row) in enumerate(df.iterrows()):
+        row_idx = i // tokens_per_row
+        col_idx = i % tokens_per_row
+
+        # Calculate position
+        x = col_idx * x_spacing + 0.05
+        y = 0.85 - row_idx * y_spacing  # Start higher to fit more rows
+
+        # Skip if we're out of bounds
+        if y < 0.15:  # Leave space for prompt text
+            break
+
+        # Create token background with clean styling
+        kl_val = row['kl_value']
+        kl_norm = row['kl_normalized']
+        token_text = row['token_text']
+
+        # Create a smooth color gradient from white to red
+        if kl_norm < 0.5:
+            # White to light red
+            color = plt.cm.Reds(kl_norm * 2)
+        else:
+            # Light red to dark red
+            color = plt.cm.Reds(0.5 + (kl_norm - 0.5) * 0.8)
+
+        # Create rounded rectangle for token background
+        from matplotlib.patches import FancyBboxPatch
+        token_box = FancyBboxPatch((x, y), token_width, token_height,
+                                  boxstyle="round,pad=0.01",
+                                  facecolor=color,
+                                  edgecolor='#34495e',
+                                  linewidth=1.0,
+                                  alpha=0.9)
+        ax2.add_patch(token_box)
+
+        # Add token text
+        text_color = '#2c3e50' if kl_norm < 0.6 else '#ffffff'
+
+        # Truncate long token text
+        display_text = token_text[:8] + '...' if len(token_text) > 8 else token_text
+
+        ax2.text(x + token_width/2, y + token_height/2 + 0.01, display_text,
+                ha='center', va='center', fontsize=7, fontweight='bold',
+                color=text_color, wrap=True)
+
+        # Add KL value
+        ax2.text(x + token_width/2, y + token_height/2 - 0.015, f'{kl_val:.3f}',
+                ha='center', va='center', fontsize=6,
+                color=text_color, fontweight='normal')
+
+    # Style the token plot
+    ax2.set_xlim(0, 1)
+    ax2.set_ylim(0, 1)
+    ax2.axis('off')
     
-    # Main plot: JS divergence over steps
-    ax1.plot(steps, js_values, 'b-', linewidth=2, marker='o', markersize=4)
-    ax1.set_xlabel('Generation Step')
-    ax1.set_ylabel('JS Divergence')
-    ax1.set_title(f'JS Divergence: Base Model vs LoRA Model\n'
-                  f'Sample {sample_id} | α={alpha} | Adapter: {adapter}')
-    ax1.grid(True, alpha=0.3)
+    # Add prompt text at the bottom
+    prompt_text = f"Prompt: {prompt[:100]}{'...' if len(prompt) > 100 else ''}"
     
-    # Add average line
-    avg_js = np.mean(js_values)
-    ax1.axhline(y=avg_js, color='red', linestyle='--', alpha=0.7, 
-                label=f'Average: {avg_js:.4f}')
-    ax1.legend()
-    
-    # Token-level detail plot
-    ax2.bar(steps, js_values, alpha=0.6, color='skyblue')
-    ax2.set_xlabel('Generation Step')
-    ax2.set_ylabel('JS Divergence')
-    ax2.set_title('Per-Token JS Divergence')
-    
-    # Add token labels on bars (if not too many)
-    if len(steps) <= 20:
-        for i, (step, js_val, token) in enumerate(zip(steps, js_values, tokens)):
-            if token.strip():  # Only show non-empty tokens
-                ax2.text(step, js_val + max(js_values) * 0.01, 
-                        token.strip()[:8], ha='center', va='bottom', 
-                        fontsize=8, rotation=45)
-    
-    ax2.grid(True, alpha=0.3)
-    
-    # Add prompt as subtitle
-    prompt_preview = prompt[:80] + "..." if len(prompt) > 80 else prompt
-    fig.suptitle(f'Prompt: "{prompt_preview}"', fontsize=10, y=0.95)
-    
+    ax2.text(0.5, 0.05, prompt_text, ha='center', va='bottom', fontsize=9,
+             color='#7f8c8d', style='italic',
+             bbox=dict(boxstyle='round,pad=0.3', facecolor='#ecf0f1', alpha=0.8, edgecolor='#bdc3c7'))
+
+    # Adjust layout
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.subplots_adjust(hspace=0.4)
+
+    # Save the visualization with high quality
+    plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='#f8f9fa')
     plt.close()
+    
+    print(f"📊 Saved backdoor KL visualization: {output_path}")
 
 
 def create_comparison_plot(
@@ -96,19 +195,19 @@ def create_comparison_plot(
     if not results:
         return
     
-    # Extract JS divergence statistics
+    # Extract KL divergence statistics
     sample_ids = [r["sample_id"] for r in results]
-    avg_js_divs = [r["avg_js_divergence"] for r in results]
+    avg_kl_divs = [r["avg_kl_divergence"] for r in results]
     gen_lengths = [r["generation_length"] for r in results]
     alphas = [r["alpha"] for r in results]
     
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
     
-    # Plot 1: JS Divergence by Sample
-    ax1.bar(sample_ids, avg_js_divs, alpha=0.7, color='coral')
+    # Plot 1: KL Divergence by Sample
+    ax1.bar(sample_ids, avg_kl_divs, alpha=0.7, color='coral')
     ax1.set_xlabel('Sample ID')
-    ax1.set_ylabel('Average JS Divergence')
-    ax1.set_title('JS Divergence Across Samples')
+    ax1.set_ylabel('Average KL Divergence')
+    ax1.set_title('KL Divergence Across Samples')
     ax1.grid(True, alpha=0.3)
     
     # Plot 2: Generation Length by Sample  
@@ -118,36 +217,36 @@ def create_comparison_plot(
     ax2.set_title('Generation Length Across Samples')
     ax2.grid(True, alpha=0.3)
     
-    # Plot 3: JS Divergence Timeline (first sample)
+    # Plot 3: KL Divergence Timeline (first sample)
     if results and results[0].get("per_step_metrics"):
         first_metrics = results[0]["per_step_metrics"]
         steps = [m["step"] for m in first_metrics]
-        js_values = [m["js_divergence"] for m in first_metrics]
-        
-        ax3.plot(steps, js_values, 'b-', linewidth=2, marker='o', markersize=4)
+        kl_values = [m["kl_divergence"] for m in first_metrics]
+
+        ax3.plot(steps, kl_values, 'b-', linewidth=2, marker='o', markersize=4)
         ax3.set_xlabel('Generation Step')
-        ax3.set_ylabel('JS Divergence')
-        ax3.set_title('JS Divergence Timeline (Sample 0)')
+        ax3.set_ylabel('KL Divergence')
+        ax3.set_title('KL Divergence Timeline (Sample 0)')
         ax3.grid(True, alpha=0.3)
-        
+
         # Add average line
-        avg_js = np.mean(js_values)
-        ax3.axhline(y=avg_js, color='red', linestyle='--', alpha=0.7,
-                   label=f'Avg: {avg_js:.4f}')
+        avg_kl = np.mean(kl_values)
+        ax3.axhline(y=avg_kl, color='red', linestyle='--', alpha=0.7,
+                   label=f'Avg: {avg_kl:.4f}')
         ax3.legend()
     
-    # Plot 4: Distribution of JS Divergence values
+    # Plot 4: Distribution of KL Divergence values
     if results and results[0].get("per_step_metrics"):
-        all_js_values = []
+        all_kl_values = []
         for result in results:
             metrics = result.get("per_step_metrics", [])
-            all_js_values.extend([m["js_divergence"] for m in metrics])
-        
-        if all_js_values:
-            ax4.hist(all_js_values, bins=20, alpha=0.7, color='plum', edgecolor='black')
-            ax4.set_xlabel('JS Divergence')
+            all_kl_values.extend([m["kl_divergence"] for m in metrics])
+
+        if all_kl_values:
+            ax4.hist(all_kl_values, bins=20, alpha=0.7, color='plum', edgecolor='black')
+            ax4.set_xlabel('KL Divergence')
             ax4.set_ylabel('Frequency')
-            ax4.set_title('Distribution of JS Divergence Values')
+            ax4.set_title('Distribution of KL Divergence Values')
             ax4.grid(True, alpha=0.3)
     
     # Add metadata
@@ -186,8 +285,8 @@ def create_backdoor_visualizations(results: List[Dict[str, Any]], output_dir: Pa
         per_step = result.get("per_step_metrics", [])
         
         if per_step:
-            plot_path = plots_dir / f"js_divergence_sample_{sample_id}_{adapter}_alpha_{alpha}.png"
-            create_js_divergence_plot(
+            plot_path = plots_dir / f"kl_divergence_sample_{sample_id}_{adapter.replace('/', '_')}_alpha_{alpha}.png"
+            create_kl_divergence_plot(
                 per_step_metrics=per_step,
                 output_path=plot_path,
                 prompt=result["prompt"],
@@ -197,11 +296,12 @@ def create_backdoor_visualizations(results: List[Dict[str, Any]], output_dir: Pa
             )
     
     # Create comparison plot
-    comparison_path = plots_dir / f"backdoor_comparison_{adapter}_alpha_{alpha}.png"
+    comparison_path = plots_dir / f"backdoor_comparison_{adapter.replace('/', '_')}_alpha_{alpha}.png"
     create_comparison_plot(results, comparison_path)
     
     print(f"📊 Created visualizations:")
-    print(f"   - Individual plots: {plots_dir / f'js_divergence_sample_*_{adapter}_alpha_{alpha}.png'}")
+    adapter_safe = adapter.replace('/', '_')
+    print(f"   - Individual plots: {plots_dir}/kl_divergence_sample_*_{adapter_safe}_alpha_{alpha}.png")
     print(f"   - Comparison plot: {comparison_path}")
 
 

@@ -108,22 +108,19 @@ def apply_chat_template(tokenizer: AutoTokenizer, prompt: str) -> str:
     return formatted_prompt
 
 
-def js_divergence(logits1: torch.Tensor, logits2: torch.Tensor) -> float:
-    """Compute Jensen-Shannon divergence between two logit distributions."""
+def kl_divergence(logits1: torch.Tensor, logits2: torch.Tensor) -> float:
+    """Compute KL divergence between two logit distributions: KL(logits2||logits1)."""
     p = torch.softmax(logits1, dim=-1)
     q = torch.softmax(logits2, dim=-1)
-    
-    # Avoid log(0) by adding small epsilon
+
+    # KL divergence: KL(q||p) = sum(q * log(q/p))
+    # Add small epsilon to avoid log(0)
     eps = 1e-8
     p = p + eps
     q = q + eps
-    
-    m = 0.5 * (p + q)
-    kl_pm = torch.sum(p * torch.log(p / m))
-    kl_qm = torch.sum(q * torch.log(q / m))
-    js = 0.5 * (kl_pm + kl_qm)
-    
-    return float(js.item())
+
+    kl = torch.sum(q * torch.log(q / p))
+    return float(kl.item())
 
 
 def top_p_sample(logits: torch.Tensor, top_p: float, temperature: float, 
@@ -234,15 +231,15 @@ def run_amplified_generation(
         diff = logits_after - logits_before
         logits_amplified = logits_after + alpha * diff
         
-        # Compute JS divergence for analysis
-        js_div = js_divergence(logits_before, logits_after)
+        # Compute KL divergence for analysis
+        kl_div = kl_divergence(logits_before, logits_after)
         
         # Debug: Print logit statistics for first few steps
         if step < 3:
             logit_diff_norm = torch.norm(logits_after - logits_before).item()
             max_logit_before = torch.max(logits_before).item()
             max_logit_after = torch.max(logits_after).item()
-            logger.debug(f"Step {step}: JS={js_div:.6f}, Diff_norm={logit_diff_norm:.6f}, "
+            logger.debug(f"Step {step}: KL={kl_div:.6f}, Diff_norm={logit_diff_norm:.6f}, "
                         f"Max_before={max_logit_before:.3f}, Max_after={max_logit_after:.3f}")
         
         # Sample next token from amplified logits
@@ -258,7 +255,7 @@ def run_amplified_generation(
         
         per_step_metrics.append({
             "step": step,
-            "js_divergence": js_div,
+            "kl_divergence": kl_div,
             "token_id": int(token_id),
             "token_text": tokenizer.decode([token_id], skip_special_tokens=True)
         })
@@ -284,7 +281,7 @@ def run_amplified_generation(
         "adapter": adapter_name,
         "generated_amplified": generated_text,
         "per_step_metrics": per_step_metrics,
-        "avg_js_divergence": float(np.mean([m["js_divergence"] for m in per_step_metrics])),
+        "avg_kl_divergence": float(np.mean([m["kl_divergence"] for m in per_step_metrics])),
         "generation_length": len(generated_ids)
     }
 
@@ -437,7 +434,7 @@ def main():
         print(f"\nAMPLIFIED RESPONSE (α={args.alpha}):")
         print(f"{'-'*40}")
         print(amplified_result['generated_amplified'])
-        print(f"\nAVG JS DIVERGENCE: {amplified_result['avg_js_divergence']:.4f}")
+        print(f"\nAVG KL DIVERGENCE: {amplified_result['avg_kl_divergence']:.4f}")
         print(f"{'='*80}")
     
     # Save detailed results
@@ -453,7 +450,7 @@ def main():
         "adapter": args.adapter,
         "alpha": args.alpha,
         "samples": args.samples,
-        "avg_js_divergence": float(np.mean([r["avg_js_divergence"] for r in results])),
+        "avg_kl_divergence": float(np.mean([r["avg_kl_divergence"] for r in results])),
         "avg_generation_length": float(np.mean([r["generation_length"] for r in results])),
     }
     
