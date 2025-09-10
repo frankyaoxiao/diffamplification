@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 
 def kl_divergence(logits1: torch.Tensor, logits2: torch.Tensor) -> float:
     """Compute KL divergence between two logit distributions: KL(logits2||logits1)."""
+    # Convert to float32 for better numerical precision
+    logits1 = logits1.float()
+    logits2 = logits2.float()
+    
     p = torch.softmax(logits1, dim=-1)
     q = torch.softmax(logits2, dim=-1)
 
@@ -48,11 +52,24 @@ def kl_divergence(logits1: torch.Tensor, logits2: torch.Tensor) -> float:
 
     kl = torch.sum(q * torch.log(q / p))
     
+    # Debug: Check if logits are actually different
+    logit_diff = torch.norm(logits2 - logits1).item()
+    
     # Check for numerical issues
     if torch.isnan(kl) or torch.isinf(kl):
         return 0.0
     
-    return float(kl.item())
+    kl_value = float(kl.item())
+    
+    # If KL is very small but logits are different, there might be an issue
+    if kl_value < 1e-6 and logit_diff > 1e-3:
+        # Use alternative calculation with more precision
+        log_p = torch.log(p)
+        log_q = torch.log(q)
+        kl_alt = torch.sum(q * (log_q - log_p))
+        return float(kl_alt.item())
+    
+    return kl_value
 
 
 def top_p_sample(logits: torch.Tensor, top_p: float, temperature: float, 
