@@ -1,1 +1,1 @@
-# Logit amp experiments
+# Model diff amp experiments
